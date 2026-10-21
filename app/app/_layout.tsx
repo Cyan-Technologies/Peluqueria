@@ -30,6 +30,7 @@ function RootLayoutNav() {
             <Stack.Screen name="index" />
             <Stack.Screen name="(tabs)" />
             <Stack.Screen name="reservar/[slug]" options={{ headerShown: false }} />
+            <Stack.Screen name="cita/[token]" options={{ headerShown: false }} />
             <Stack.Screen name="modal" options={{ presentation: 'modal', headerShown: true, title: 'Información' }} />
           </Stack>
         </ThemeProvider>

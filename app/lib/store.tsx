@@ -20,12 +20,19 @@ export type Appointment = {
   date: string;
   time: string;
   status: AppointmentStatus;
+  changeRequest: { date: string; time: string } | null;
 };
 
 export type Client = {
   id: string;
   name: string;
   contact: string;
+};
+
+export type BusinessClosure = {
+  id: string;
+  date: string;
+  reason: string;
 };
 
 export type Business = {
@@ -44,6 +51,7 @@ type AppData = {
   services: Service[];
   appointments: Appointment[];
   clients: Client[];
+  closures: BusinessClosure[];
 };
 
 type Store = AppData & {
@@ -52,9 +60,15 @@ type Store = AppData & {
   refresh: () => Promise<void>;
   updateBusiness: (business: Business) => Promise<void>;
   addService: (service: Omit<Service, 'id'>) => Promise<void>;
-  addAppointment: (appointment: Omit<Appointment, 'id' | 'status'>) => Promise<boolean>;
+  addAppointment: (appointment: Omit<Appointment, 'id' | 'status' | 'changeRequest'>) => Promise<boolean>;
+  getRescheduleSlots: (id: string, date: string) => Promise<string[]>;
+  rescheduleAppointment: (id: string, date: string, time: string) => Promise<boolean>;
+  approveChangeRequest: (id: string) => Promise<void>;
+  rejectChangeRequest: (id: string) => Promise<void>;
   updateStatus: (id: string, status: AppointmentStatus) => Promise<void>;
   addClient: (name: string, contact: string) => Promise<void>;
+  addClosure: (date: string, reason: string) => Promise<void>;
+  removeClosure: (id: string) => Promise<void>;
 };
 
 const emptyData: AppData = {
@@ -62,6 +76,7 @@ const emptyData: AppData = {
   services: [],
   appointments: [],
   clients: [],
+  closures: [],
 };
 
 const statusToDatabase: Record<AppointmentStatus, string> = {
@@ -111,14 +126,16 @@ export function StoreProvider({ children }: PropsWithChildren) {
       .single();
     if (businessError) throw businessError;
 
-    const [serviceResult, clientResult, appointmentResult] = await Promise.all([
+    const [serviceResult, clientResult, appointmentResult, closureResult] = await Promise.all([
       client.from('services').select('id,name,description,price,duration_minutes').eq('business_id', businessRow.id).order('created_at'),
       client.from('clients').select('id,name,contact').eq('business_id', businessRow.id).order('created_at', { ascending: false }),
-      client.from('appointments').select('id,client_name,contact,service_id,appointment_date,start_time,status').eq('business_id', businessRow.id).order('appointment_date').order('start_time'),
+      client.from('appointments').select('id,client_name,contact,service_id,appointment_date,start_time,status,change_request_date,change_request_time').eq('business_id', businessRow.id).order('appointment_date').order('start_time'),
+      client.from('business_closures').select('id,closed_date,reason').eq('business_id', businessRow.id).order('closed_date'),
     ]);
     if (serviceResult.error) throw serviceResult.error;
     if (clientResult.error) throw clientResult.error;
     if (appointmentResult.error) throw appointmentResult.error;
+    if (closureResult.error) throw closureResult.error;
 
     const nextData: AppData = {
       business: {
@@ -147,6 +164,15 @@ export function StoreProvider({ children }: PropsWithChildren) {
         date: appointment.appointment_date,
         time: String(appointment.start_time).slice(0, 5),
         status: statusFromDatabase[appointment.status] ?? 'Pendiente',
+        changeRequest: appointment.change_request_date && appointment.change_request_time ? {
+          date: appointment.change_request_date,
+          time: String(appointment.change_request_time).slice(0, 5),
+        } : null,
+      })),
+      closures: closureResult.data.map((closure) => ({
+        id: closure.id,
+        date: closure.closed_date,
+        reason: closure.reason,
       })),
     };
 
@@ -248,6 +274,39 @@ export function StoreProvider({ children }: PropsWithChildren) {
       await refresh();
       return true;
     },
+    getRescheduleSlots: async (id, date) => {
+      const { data: slots, error } = await requireSupabase().rpc('get_reschedule_slots', {
+        p_appointment_id: id,
+        p_date: date,
+      });
+      if (error) throw error;
+      return ((slots ?? []) as { slot: string }[]).map((row) => String(row.slot).slice(0, 5));
+    },
+    rescheduleAppointment: async (id, date, time) => {
+      const { error } = await requireSupabase().rpc('reschedule_appointment', {
+        p_appointment_id: id,
+        p_date: date,
+        p_start_time: time,
+      });
+      if (error?.message.includes('HORARIO_OCUPADO')) return false;
+      if (error) throw error;
+      await refresh();
+      return true;
+    },
+    approveChangeRequest: async (id) => {
+      const { error } = await requireSupabase().rpc('approve_customer_appointment_change', {
+        p_appointment_id: id,
+      });
+      if (error) throw error;
+      await refresh();
+    },
+    rejectChangeRequest: async (id) => {
+      const { error } = await requireSupabase().rpc('reject_customer_appointment_change', {
+        p_appointment_id: id,
+      });
+      if (error) throw error;
+      await refresh();
+    },
     updateStatus: async (id, status) => {
       const { error } = await requireSupabase()
         .from('appointments')
@@ -264,6 +323,31 @@ export function StoreProvider({ children }: PropsWithChildren) {
         contact: contact.trim(),
       });
       if (error?.code === '23505') throw new Error('Ya existe un cliente con ese teléfono o correo.');
+      if (error) throw error;
+      await refresh();
+    },
+    addClosure: async (date, reason) => {
+      const { error } = await requireSupabase().from('business_closures').insert({
+        business_id: data.business.id,
+        closed_date: date,
+        reason: reason.trim(),
+      });
+      if (error?.code === '23505') throw new Error('Ya existe un cierre registrado para esa fecha.');
+      if (error?.message.includes('CIERRE_CON_CITAS_ACTIVAS')) {
+        throw new Error('Esa fecha ya tiene citas pendientes o confirmadas. Reprográmalas o cancélalas antes de cerrar el negocio.');
+      }
+      if (error?.message.includes('FECHA_DE_CIERRE_INVALIDA')) {
+        throw new Error('La fecha de cierre debe ser hoy o una fecha futura.');
+      }
+      if (error) throw error;
+      await refresh();
+    },
+    removeClosure: async (id) => {
+      const { error } = await requireSupabase()
+        .from('business_closures')
+        .delete()
+        .eq('id', id)
+        .eq('business_id', data.business.id);
       if (error) throw error;
       await refresh();
     },

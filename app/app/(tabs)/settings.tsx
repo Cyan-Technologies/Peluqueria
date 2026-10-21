@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { ActivityIndicator, Alert, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Card, Field, Heading, Page, ui } from '@/components/ui';
 import { useAuth } from '@/lib/auth';
-import { palette, useStore } from '@/lib/store';
+import { formatDate, palette, useStore } from '@/lib/store';
 
 function notify(title: string, body: string) {
   if (Platform.OS === 'web') window.alert(`${title}\n${body}`);
@@ -11,7 +11,7 @@ function notify(title: string, body: string) {
 }
 
 export default function SettingsScreen() {
-  const { business, services, updateBusiness, addService, ready, loadError, refresh } = useStore();
+  const { business, services, closures, updateBusiness, addService, addClosure, removeClosure, ready, loadError, refresh } = useStore();
   const { signOut } = useAuth();
   const [form, setForm] = useState(business);
   const [addingService, setAddingService] = useState(false);
@@ -19,6 +19,8 @@ export default function SettingsScreen() {
   const [description, setDescription] = useState('');
   const [price, setPrice] = useState('');
   const [duration, setDuration] = useState('');
+  const [closureDate, setClosureDate] = useState('');
+  const [closureReason, setClosureReason] = useState('');
   const link = `${process.env.EXPO_PUBLIC_APP_URL || (Platform.OS === 'web' ? window.location.origin : '')}/reservar/${form.slug || business.slug}`;
 
   useEffect(() => {
@@ -55,6 +57,51 @@ export default function SettingsScreen() {
     } catch (error) {
       notify('No se pudo guardar el servicio', error instanceof Error ? error.message : 'Error de conexión con la nube.');
     }
+  };
+
+  const saveClosure = async () => {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(closureDate);
+    const parsed = match ? new Date(`${closureDate}T12:00:00`) : null;
+    if (!parsed || Number.isNaN(parsed.getTime()) || formatDate(parsed) !== closureDate) {
+      notify('Revisa la fecha', 'Escribe una fecha válida con el formato AAAA-MM-DD.');
+      return;
+    }
+    if (closureDate < formatDate(new Date())) {
+      notify('Fecha pasada', 'Solo puedes registrar cierres para hoy o una fecha futura.');
+      return;
+    }
+    if (closureReason.trim().length > 120) {
+      notify('Motivo muy largo', 'El motivo puede tener hasta 120 caracteres.');
+      return;
+    }
+    try {
+      await addClosure(closureDate, closureReason);
+      setClosureDate('');
+      setClosureReason('');
+      notify('Cierre guardado', 'Ese día ya no aparecerá como disponible para reservas.');
+    } catch (error) {
+      notify('No se pudo guardar el cierre', error instanceof Error ? error.message : 'Error de conexión con la nube.');
+    }
+  };
+
+  const deleteClosure = async (id: string) => {
+    try {
+      await removeClosure(id);
+    } catch (error) {
+      notify('No se pudo eliminar el cierre', error instanceof Error ? error.message : 'Error de conexión con la nube.');
+    }
+  };
+
+  const confirmDeleteClosure = (id: string) => {
+    const remove = () => { void deleteClosure(id); };
+    if (Platform.OS === 'web') {
+      if (window.confirm('¿Eliminar este cierre y volver a ofrecer citas en esa fecha?')) remove();
+      return;
+    }
+    Alert.alert('Eliminar cierre', 'Se volverán a ofrecer horarios para esa fecha.', [
+      { text: 'Conservar', style: 'cancel' },
+      { text: 'Eliminar', style: 'destructive', onPress: remove },
+    ]);
   };
 
   const logout = async () => {
@@ -124,6 +171,26 @@ export default function SettingsScreen() {
           <Pressable style={ui.button} onPress={saveBusiness}><Text style={ui.buttonText}>Guardar horarios</Text></Pressable>
         </Card>
 
+        <Card>
+          <Text style={ui.sectionTitle}>Cierres por fecha</Text>
+          <Text style={ui.muted}>Agrega vacaciones, festivos u otros días especiales en los que no recibirás citas.</Text>
+          {closures.length ? closures.map((closure) => (
+            <View key={closure.id} style={styles.closureRow}>
+              <View style={styles.serviceInfo}>
+                <Text style={styles.serviceName}>{new Date(`${closure.date}T12:00:00`).toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</Text>
+                {closure.reason ? <Text style={ui.muted}>{closure.reason}</Text> : null}
+              </View>
+              <Pressable onPress={() => confirmDeleteClosure(closure.id)} accessibilityRole="button" accessibilityLabel="Eliminar cierre">
+                <Text style={styles.removeText}>Eliminar</Text>
+              </Pressable>
+            </View>
+          )) : <Text style={ui.muted}>Todavía no hay cierres especiales.</Text>}
+          <Field label="Fecha (AAAA-MM-DD)" value={closureDate} onChangeText={setClosureDate} placeholder="2026-12-25" keyboardType="numbers-and-punctuation" />
+          <Field label="Motivo (opcional)" value={closureReason} onChangeText={setClosureReason} placeholder="Ej. Vacaciones" maxLength={120} />
+          <Pressable style={ui.button} onPress={saveClosure}><Text style={ui.buttonText}>Agregar cierre</Text></Pressable>
+          <Text style={styles.helper}>No se puede cerrar un día que ya tenga citas pendientes o confirmadas; primero cámbialas o cancélalas.</Text>
+        </Card>
+
         <Card style={styles.linkCard}>
           <Text style={styles.linkEyebrow}>RESERVAS EN LÍNEA</Text>
           <Text style={ui.sectionTitle}>Tu enlace privado</Text>
@@ -152,6 +219,8 @@ const styles = StyleSheet.create({
   serviceIconText: { color: palette.green, fontSize: 18 },
   serviceInfo: { flex: 1, gap: 3 },
   serviceName: { color: palette.ink, fontWeight: '700', fontSize: 14 },
+  closureRow: { flexDirection: 'row', alignItems: 'center', gap: 12, borderBottomWidth: 1, borderBottomColor: palette.border, paddingVertical: 8 },
+  removeText: { color: '#9a6358', fontSize: 12, fontWeight: '700' },
   price: { color: palette.ink, fontSize: 14, fontWeight: '800' },
   form: { gap: 12, paddingTop: 5 },
   row: { flexDirection: 'row', gap: 10 },

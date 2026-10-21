@@ -24,7 +24,7 @@ Aplicación móvil (iOS/Android) para administrar citas y clientes, con página 
 
    La clave publicable/anon está diseñada para estar en la app; **nunca uses `service_role` o una clave `sb_secret_` en ella**. `.env` está ignorado por Git.
 
-4. En el **SQL Editor** de Supabase, abre y ejecuta una sola vez [`app/supabase/migrations/202610190001_initial_cloud_mvp.sql`](./app/supabase/migrations/202610190001_initial_cloud_mvp.sql).
+4. En el **SQL Editor** de Supabase, abre y ejecuta en orden los archivos de [`app/supabase/migrations/`](./app/supabase/migrations/). Si ya ejecutaste la migración inicial, ejecuta solo las migraciones nuevas que aún no hayas aplicado.
 5. Para pruebas rápidas, en **Authentication → Providers → Email**, desactiva temporalmente **Confirm email**. En producción se debe volver a activar y configurar el proveedor de correo.
 6. Inicia la aplicación desde `app`:
 
@@ -36,6 +36,18 @@ Aplicación móvil (iOS/Android) para administrar citas y clientes, con página 
    Abre `http://localhost:8081`, crea una cuenta con un slug único, por ejemplo `barberia-andres`, y luego agrega los servicios en **Ajustes**. No hay datos de muestra en las cuentas cloud.
 
 La app crea el perfil del negocio automáticamente al registrar la cuenta. Los horarios iniciales son 09:00–19:00 y domingo cerrado. Para probar la página de clientes, abre `http://localhost:8081/reservar/barberia-andres`; las citas que se soliciten aparecerán en la agenda y el cliente quedará asociado a ese negocio.
+
+### Actualizar una base de datos ya configurada
+
+Si ya ejecutaste la migración inicial, ejecuta en orden las migraciones siguientes que aún no estén aplicadas:
+
+1. [`app/supabase/migrations/202610200001_reschedule_appointments.sql`](./app/supabase/migrations/202610200001_reschedule_appointments.sql) habilita la reprogramación de citas pendientes o confirmadas desde la agenda.
+2. [`app/supabase/migrations/202610200002_business_closures.sql`](./app/supabase/migrations/202610200002_business_closures.sql) habilita cierres especiales por fecha.
+3. [`app/supabase/migrations/202610200003_customer_appointment_management.sql`](./app/supabase/migrations/202610200003_customer_appointment_management.sql) crea enlaces privados para que los clientes cancelen con 24 horas de anticipación o soliciten un cambio, que el negocio aprueba desde la agenda.
+
+Los cierres se aplican tanto a los horarios mostrados a clientes como a nuevas citas y reprogramaciones. Para evitar dejar citas existentes o solicitudes de cambio pendientes sin atender, la base de datos no permite registrar el cierre de una fecha que tenga citas pendientes o confirmadas; primero hay que moverlas, responder las solicitudes de cambio o cancelarlas.
+
+El enlace privado de administración se muestra al cliente después de reservar; debe conservarlo para poder volver a consultar o modificar su cita. Los cambios solicitados no se aplican hasta que el negocio los apruebe. Las reservas creadas antes de instalar esta migración no tienen enlace de autogestión; el dueño debe ayudar a esos clientes desde la agenda. Las reservas creadas manualmente por el dueño tampoco reciben enlace de autogestión.
 
 ## Probar desde otro dispositivo
 
@@ -71,6 +83,7 @@ El sitio resultante se genera en `app/dist`. Después de cambiar variables de en
 - `app/app/(tabs)/two.tsx`: cartera e historial de clientes.
 - `app/app/(tabs)/settings.tsx`: perfil, servicios, horarios, enlace y cierre de sesión.
 - `app/app/reservar/[slug].tsx`: página pública de reservas.
+- `app/app/cita/[token].tsx`: página privada para administrar una reserva del cliente.
 - `app/lib/auth.tsx`, `app/lib/supabase.ts`: autenticación y cliente de Supabase.
 - `app/lib/store.tsx`: carga y operaciones de datos cloud del dueño.
 - `app/supabase/migrations/`: tablas, índices, permisos RLS y funciones SQL de reservas.
@@ -82,7 +95,8 @@ El sitio resultante se genera en `app/dist`. Después de cambiar variables de en
 - El enlace de reserva no aparece en un directorio, pero es accesible para cualquiera que lo reciba.
 - Las solicitudes públicas no requieren cuenta y no se han agregado CAPTCHA ni límites de tráfico. Antes de anunciar el enlace públicamente, añade protección contra abuso y monitoreo.
 - La autenticación por correo y los dominios permitidos de redirección deben configurarse para producción.
-- No hay correo automático de confirmación, recordatorios, cambios ni cancelación por parte del cliente.
+- No se envían correos ni recordatorios automáticos; el cliente necesita conservar su enlace privado para volver a consultar su solicitud.
+- Los cierres por fecha se pueden administrar desde Ajustes; no hay todavía una acción masiva para cerrar varios días o un rango de vacaciones.
 - Revisar la URL pública del proyecto Supabase, backups y políticas antes de cargar datos personales reales.
 
 ## Publicar la app móvil

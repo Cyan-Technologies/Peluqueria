@@ -1,5 +1,5 @@
 import { Link } from 'expo-router';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Card, Field, Heading, Page, ui } from '@/components/ui';
 import { Appointment, AppointmentStatus, formatDate, palette, useStore } from '@/lib/store';
@@ -10,7 +10,7 @@ function message(title: string, body: string) {
 }
 
 export default function AgendaScreen() {
-  const { appointments, services, business, addAppointment, updateStatus, ready, loadError, refresh } = useStore();
+  const { appointments, services, business, addAppointment, getRescheduleSlots, rescheduleAppointment, approveChangeRequest, rejectChangeRequest, updateStatus, ready, loadError, refresh } = useStore();
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [viewMode, setViewMode] = useState<'day' | 'week'>('day');
   const [adding, setAdding] = useState(false);
@@ -74,6 +74,23 @@ export default function AgendaScreen() {
     }
   };
 
+  const handleReschedule = (id: string, date: string, time: string) => rescheduleAppointment(id, date, time);
+
+  const handleChangeRequest = async (id: string, approve: boolean) => {
+    try {
+      if (approve) await approveChangeRequest(id);
+      else await rejectChangeRequest(id);
+    } catch (error) {
+      const source = error instanceof Error ? error.message : '';
+      const detail = source.includes('HORARIO_OCUPADO')
+        ? 'Ese horario se ocupó antes de aprobar el cambio. Rechaza la solicitud o contacta al cliente.'
+        : source.includes('NEGOCIO_CERRADO_EN_ESTA_FECHA')
+          ? 'La fecha solicitada tiene un cierre del negocio.'
+          : source || 'Error de conexión con la nube.';
+      message(approve ? 'No se pudo aprobar el cambio' : 'No se pudo rechazar el cambio', detail);
+    }
+  };
+
   if (!ready) return <Page><Card style={styles.empty}><ActivityIndicator color={palette.green} /><Text style={ui.muted}>Cargando datos del negocio…</Text></Card></Page>;
   if (loadError) return <Page><Card><Text style={ui.sectionTitle}>No se pudo cargar la agenda</Text><Text style={ui.muted}>{loadError}</Text><Pressable style={ui.button} onPress={() => refresh().catch(() => undefined)}><Text style={ui.buttonText}>Reintentar</Text></Pressable></Card></Page>;
 
@@ -133,7 +150,16 @@ export default function AgendaScreen() {
             <Text style={[ui.muted, { textAlign: 'center' }]}>Aún no hay citas para este día. Puedes agregar una o compartir tu enlace de reservas.</Text>
           </Card>
         ) : visibleAppointments.map((appointment) => (
-          <AppointmentCard key={appointment.id} appointment={appointment} service={services.find((item) => item.id === appointment.serviceId)?.name ?? 'Servicio'} onStatus={handleStatus} showDate={viewMode === 'week'} />
+          <AppointmentCard
+            key={appointment.id}
+            appointment={appointment}
+            service={services.find((item) => item.id === appointment.serviceId)?.name ?? 'Servicio'}
+            onStatus={handleStatus}
+            getSlots={getRescheduleSlots}
+            onReschedule={handleReschedule}
+            onChangeRequest={handleChangeRequest}
+            showDate={viewMode === 'week'}
+          />
         ))}
 
         <View style={styles.footerSpace} />
@@ -142,7 +168,91 @@ export default function AgendaScreen() {
   );
 }
 
-function AppointmentCard({ appointment, service, onStatus, showDate }: { appointment: Appointment; service: string; onStatus: (id: string, status: AppointmentStatus) => void; showDate: boolean }) {
+function AppointmentCard({
+  appointment,
+  service,
+  onStatus,
+  getSlots,
+  onReschedule,
+  onChangeRequest,
+  showDate,
+}: {
+  appointment: Appointment;
+  service: string;
+  onStatus: (id: string, status: AppointmentStatus) => void;
+  getSlots: (id: string, date: string) => Promise<string[]>;
+  onReschedule: (id: string, date: string, time: string) => Promise<boolean>;
+  onChangeRequest: (id: string, approve: boolean) => Promise<void>;
+  showDate: boolean;
+}) {
+  const [rescheduling, setRescheduling] = useState(false);
+  const [targetDate, setTargetDate] = useState(appointment.date);
+  const [availableSlots, setAvailableSlots] = useState<string[]>([]);
+  const [selectedTime, setSelectedTime] = useState('');
+  const [slotsLoading, setSlotsLoading] = useState(false);
+  const [slotsError, setSlotsError] = useState('');
+  const [saving, setSaving] = useState(false);
+  const slotRequest = useRef(0);
+  const targetDateValue = new Date(`${targetDate}T12:00:00`);
+  const weekStart = new Date(targetDateValue);
+  weekStart.setDate(weekStart.getDate() - ((weekStart.getDay() + 6) % 7));
+  const weekDates = Array.from({ length: 7 }, (_, index) => {
+    const date = new Date(weekStart);
+    date.setDate(date.getDate() + index);
+    return date;
+  });
+
+  const loadSlots = async (date: string) => {
+    const requestId = ++slotRequest.current;
+    setSlotsLoading(true);
+    setSlotsError('');
+    setAvailableSlots([]);
+    setSelectedTime('');
+    try {
+      const slots = await getSlots(appointment.id, date);
+      if (requestId === slotRequest.current) setAvailableSlots(slots);
+    } catch (error) {
+      if (requestId === slotRequest.current) {
+        setSlotsError(error instanceof Error ? error.message : 'No se pudieron consultar los horarios.');
+      }
+    } finally {
+      if (requestId === slotRequest.current) setSlotsLoading(false);
+    }
+  };
+
+  const toggleReschedule = () => {
+    if (rescheduling) {
+      slotRequest.current += 1;
+      setRescheduling(false);
+      return;
+    }
+    setRescheduling(true);
+    setTargetDate(appointment.date);
+    void loadSlots(appointment.date);
+  };
+
+  const saveReschedule = async () => {
+    if (!selectedTime) return;
+    setSaving(true);
+    try {
+      const success = await onReschedule(appointment.id, targetDate, selectedTime);
+      if (!success) {
+        message('Horario ocupado', 'Ese horario se acaba de ocupar. Elige otro disponible.');
+        await loadSlots(targetDate);
+        return;
+      }
+      setRescheduling(false);
+    } catch (error) {
+      message('No se pudo cambiar la cita', error instanceof Error ? error.message : 'Error de conexión con la nube.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleChangeRequest = async (approve: boolean) => {
+    await onChangeRequest(appointment.id, approve);
+  };
+
   const nextStatus: AppointmentStatus = appointment.status === 'Pendiente' ? 'Confirmada' : 'Completada';
   return (
     <Card style={styles.appointment}>
@@ -157,7 +267,26 @@ function AppointmentCard({ appointment, service, onStatus, showDate }: { appoint
         </View>
         <Text style={styles.service}>{showDate ? `${new Date(`${appointment.date}T12:00:00`).toLocaleDateString('es-MX', { weekday: 'short', day: 'numeric', month: 'short' })} · ` : ''}{service}</Text>
         <Text style={ui.muted}>{appointment.contact}</Text>
+        {appointment.changeRequest ? (
+          <View style={styles.changeRequest}>
+            <Text style={styles.fieldLabel}>El cliente solicita cambiar a</Text>
+            <Text style={styles.requestedTime}>
+              {new Date(`${appointment.changeRequest.date}T12:00:00`).toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long' })} · {appointment.changeRequest.time}
+            </Text>
+            <View style={styles.requestActions}>
+              <Pressable style={ui.button} onPress={() => { void handleChangeRequest(true); }}>
+                <Text style={ui.buttonText}>Aprobar cambio</Text>
+              </Pressable>
+              <Pressable style={ui.outlineButton} onPress={() => { void handleChangeRequest(false); }}>
+                <Text style={ui.outlineText}>Rechazar</Text>
+              </Pressable>
+            </View>
+          </View>
+        ) : null}
         <View style={styles.actions}>
+          {(appointment.status === 'Pendiente' || appointment.status === 'Confirmada') && (
+            <Pressable onPress={toggleReschedule}><Text style={styles.actionLink}>{rescheduling ? 'Cerrar cambio' : 'Cambiar horario'}</Text></Pressable>
+          )}
           {appointment.status !== 'Completada' && (
             <Pressable style={ui.outlineButton} onPress={() => onStatus(appointment.id, nextStatus)}>
               <Text style={ui.outlineText}>{appointment.status === 'Pendiente' ? 'Confirmar' : 'Completar'}</Text>
@@ -168,6 +297,59 @@ function AppointmentCard({ appointment, service, onStatus, showDate }: { appoint
           )}
           <Pressable onPress={() => onStatus(appointment.id, 'Cancelada')}><Text style={styles.cancel}>Cancelar</Text></Pressable>
         </View>
+        {rescheduling ? (
+          <View style={styles.reschedule}>
+            <Text style={styles.fieldLabel}>Nueva fecha</Text>
+            <View style={styles.weekControls}>
+              <Pressable style={styles.arrow} onPress={() => {
+                const date = new Date(targetDateValue);
+                date.setDate(date.getDate() - 7);
+                const key = formatDate(date);
+                setTargetDate(key);
+                void loadSlots(key);
+              }}><Text style={styles.arrowText}>‹</Text></Pressable>
+              <Text style={ui.muted}>{weekDates[0].toLocaleDateString('es-MX', { day: 'numeric', month: 'short' })} – {weekDates[6].toLocaleDateString('es-MX', { day: 'numeric', month: 'short' })}</Text>
+              <Pressable style={styles.arrow} onPress={() => {
+                const date = new Date(targetDateValue);
+                date.setDate(date.getDate() + 7);
+                const key = formatDate(date);
+                setTargetDate(key);
+                void loadSlots(key);
+              }}><Text style={styles.arrowText}>›</Text></Pressable>
+            </View>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.rescheduleDays}>
+              {weekDates.map((date) => {
+                const key = formatDate(date);
+                const selected = key === targetDate;
+                return (
+                  <Pressable
+                    key={key}
+                    style={[styles.rescheduleDay, selected && styles.chipSelected]}
+                    onPress={() => {
+                      setTargetDate(key);
+                      void loadSlots(key);
+                    }}
+                  >
+                    <Text style={[styles.chipText, selected && styles.chipTextSelected]}>{date.toLocaleDateString('es-MX', { weekday: 'short', day: 'numeric' })}</Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+            <Text style={styles.fieldLabel}>Horarios disponibles</Text>
+            {slotsLoading ? <ActivityIndicator color={palette.green} /> : slotsError ? <Text style={styles.cancel}>{slotsError}</Text> : availableSlots.length ? (
+              <View style={styles.chips}>
+                {availableSlots.map((slot) => (
+                  <Pressable key={slot} style={[styles.chip, selectedTime === slot && styles.chipSelected]} onPress={() => setSelectedTime(slot)}>
+                    <Text style={[styles.chipText, selectedTime === slot && styles.chipTextSelected]}>{slot}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            ) : <Text style={ui.muted}>No hay horarios disponibles ese día.</Text>}
+            <Pressable style={[ui.button, (!selectedTime || saving) && styles.disabledButton]} disabled={!selectedTime || saving} onPress={saveReschedule}>
+              <Text style={ui.buttonText}>{saving ? 'Guardando…' : 'Guardar nuevo horario'}</Text>
+            </Pressable>
+          </View>
+        ) : null}
       </View>
     </Card>
   );
@@ -199,6 +381,14 @@ const styles = StyleSheet.create({
   confirmed: { color: palette.green, backgroundColor: palette.paleGreen },
   service: { color: palette.ink, fontSize: 13 },
   actions: { flexDirection: 'row', alignItems: 'center', gap: 16, marginTop: 4 },
+  reschedule: { gap: 11, borderTopWidth: 1, borderTopColor: palette.border, paddingTop: 13, marginTop: 5 },
+  changeRequest: { gap: 8, borderWidth: 1, borderColor: palette.border, borderRadius: 12, padding: 12, backgroundColor: '#f8faf5' },
+  requestedTime: { color: palette.ink, fontSize: 13, fontWeight: '700', textTransform: 'capitalize' },
+  requestActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  weekControls: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  rescheduleDays: { gap: 7 },
+  rescheduleDay: { borderWidth: 1, borderColor: palette.border, borderRadius: 20, paddingHorizontal: 10, paddingVertical: 8, backgroundColor: '#fff' },
+  disabledButton: { opacity: 0.5 },
   cancel: { color: '#9a6358', fontSize: 12, fontWeight: '600' },
   empty: { alignItems: 'center', paddingVertical: 30 },
   emptyEmoji: { fontSize: 26, color: palette.green },

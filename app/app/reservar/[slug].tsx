@@ -1,4 +1,4 @@
-import { useLocalSearchParams } from 'expo-router';
+import { Link, useLocalSearchParams } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Alert, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Card, Field, Heading, Page, ui } from '@/components/ui';
@@ -31,6 +31,7 @@ export default function BookingScreen() {
   const [clientName, setClientName] = useState('');
   const [contact, setContact] = useState('');
   const [confirmed, setConfirmed] = useState(false);
+  const [managementToken, setManagementToken] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const service = page?.services.find((item) => item.id === serviceId);
 
@@ -95,7 +96,7 @@ export default function BookingScreen() {
     }
     setSubmitting(true);
     try {
-      const { error } = await requireSupabase().rpc('request_public_booking', {
+      const { data, error } = await requireSupabase().rpc('create_public_booking_with_management_token', {
         p_slug: page?.business.slug,
         p_service_id: serviceId,
         p_date: selectedDate,
@@ -108,7 +109,14 @@ export default function BookingScreen() {
         setSlotError('Ese horario se acaba de ocupar. Elige otro disponible.');
         return;
       }
+      if (error?.message.includes('NEGOCIO_CERRADO_EN_ESTA_FECHA')) {
+        setSelectedTime('');
+        setSlotError('El negocio cerró ese día. Elige otra fecha.');
+        return;
+      }
       if (error) throw error;
+      if (typeof data !== 'string') throw new Error('La cita se creó, pero no se pudo generar el enlace para administrarla. Contacta al negocio para solicitar cambios.');
+      setManagementToken(data);
       setConfirmed(true);
     } catch (error) {
       notify('No se pudo enviar la solicitud', error instanceof Error ? error.message : 'Revisa tu conexión e inténtalo de nuevo.');
@@ -132,6 +140,12 @@ export default function BookingScreen() {
             <Text style={ui.muted}>{new Date(`${selectedDate}T12:00:00`).toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long' })} · {selectedTime}</Text>
             <Text style={styles.price}>${service?.price} MXN · {service?.duration} min</Text>
           </View>
+          <Text style={[ui.muted, { textAlign: 'center', lineHeight: 19 }]}>Guarda el siguiente enlace. Puedes cancelar o pedir un cambio hasta 24 horas antes; el negocio debe aprobar los cambios.</Text>
+          {managementToken ? (
+            <Link href={{ pathname: '/cita/[token]', params: { token: managementToken } }} asChild>
+              <Pressable style={ui.outlineButton}><Text style={ui.outlineText}>Administrar mi cita</Text></Pressable>
+            </Link>
+          ) : null}
           <Pressable style={ui.button} onPress={() => setConfirmed(false)}><Text style={ui.buttonText}>Listo</Text></Pressable>
         </Card>
       </Page>
